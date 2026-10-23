@@ -1,0 +1,14 @@
+#!/bin/bash
+# 1. Установка пакетов (Nginx, Git, Python)
+sudo apt update
+sudo apt install nginx -y
+sudo add-apt-repository ppa:git-core/ppa -y
+sudo apt install git -y
+sudo apt install python3-pip -y
+pip3 install requests --break-system-packages
+
+# 2. Настройка файрвола (UFW)
+sudo ufw allow ssh
+sudo ufw allow http
+sudo ufw allow 8000/tcp
+sudo ufw enable
