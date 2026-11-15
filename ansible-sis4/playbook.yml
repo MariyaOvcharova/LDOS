@@ -1,0 +1,83 @@
+---
+- name: Setup Frontend VM and Run Smoke Tests
+  hosts: frontend
+  become: yes
+  tasks:
+    - name: Update apt cache and install Nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Configure UFW for Frontend (SSH and HTTP)
+      ufw:
+        rule: allow
+        name: "{{ item }}"
+      loop:
+        - OpenSSH
+        - Nginx HTTP
+
+    - name: Enable UFW on Frontend
+      ufw:
+        state: enabled
+
+    - name: SMOKE TEST 1 - Check Frontend Nginx HTTP 200 OK
+      uri:
+        url: http://localhost
+        status_code: 200
+
+    - name: SMOKE TEST 2 - Check Backend SSH connectivity from Frontend
+      wait_for:
+        host: 192.168.0.13
+        port: 22
+        timeout: 5
+
+- name: Setup Backend VM and Run Smoke Tests
+  hosts: backend
+  become: yes
+  tasks:
+    - name: Install required packages for repositories
+      apt:
+        name: software-properties-common
+        state: present
+        update_cache: yes
+
+    - name: Add external Git PPA repository
+      command: add-apt-repository -y ppa:git-core/ppa
+      args:
+        creates: /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.sources
+
+    - name: Install Git and Python3-pip
+      apt:
+        name:
+          - git
+          - python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Install Python requests library via pip
+      pip:
+        name: requests
+        break_system_packages: yes
+
+    - name: Configure UFW for Backend (SSH and port 8000)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '22'
+        - '8000'
+
+    - name: Enable UFW on Backend
+      ufw:
+        state: enabled
+
+    - name: SMOKE TEST 3 - Verify Python requests library is installed
+      command: python3 -c "import requests; print(requests.__version__)"
+      register: req_check
+      changed_when: false
+
+    - name: Show requests version
+      debug:
+        msg: "Requests library version {{ req_check.stdout }} is working!"
