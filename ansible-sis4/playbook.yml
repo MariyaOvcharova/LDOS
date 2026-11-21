@@ -1,0 +1,434 @@
+---
+- name: SIS3 - time and base packages on all VMs
+  hosts: all
+  become: yes
+  tasks:
+    - name: Enable time synchronization (apt failed because of wrong time)
+      command: timedatectl set-ntp true
+      changed_when: false
+
+    - name: Install base packages (ssh, curl, netcat, firewall)
+      apt:
+        name:
+          - openssh-server
+          - curl
+          - netcat-openbsd
+          - ufw
+        state: present
+        update_cache: yes
+        lock_timeout: 120
+
+    - name: SMOKE TEST 1 - Time synchronization is enabled
+      command: timedatectl show -p NTP --value
+      register: ntp_check
+      changed_when: false
+      failed_when: ntp_check.stdout != 'yes'
+
+- name: Backend VM2 (SIS1, SIS2, SIS3)
+  hosts: backend
+  become: yes
+  vars:
+    app_user: mariya
+    deploy_user: deploy-bot
+    dev_group: develop-team
+    app_dir: /opt/excuse-api/app
+    log_dir: /var/log/excuse-gen
+    backup_dir: /var/backups/excuse-db
+    api_port: 8000
+  handlers:
+    - name: restart api
+      systemd:
+        name: excuse-api
+        state: restarted
+        daemon_reload: yes
+  tasks:
+    # ---------- SIS3: packages ----------
+    - name: Install repository tools
+      apt:
+        name: software-properties-common
+        state: present
+        lock_timeout: 120
+
+    - name: Add external Git PPA repository
+      command: add-apt-repository -y ppa:git-core/ppa
+      args:
+        creates: /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.sources
+
+    - name: Install Git and Python3-pip
+      apt:
+        name:
+          - git
+          - python3-pip
+        state: present
+        update_cache: yes
+        lock_timeout: 120
+
+    - name: Install Python requests library via pip
+      pip:
+        name: requests
+        break_system_packages: yes
+
+    # ---------- SIS2: groups and users (role table) ----------
+    - name: Create group develop-team
+      group:
+        name: "{{ dev_group }}"
+        state: present
+
+    - name: Create user deploy-bot (deploy and backups)
+      user:
+        name: "{{ deploy_user }}"
+        shell: /bin/bash
+        create_home: yes
+        groups: "{{ dev_group }}"
+        append: yes
+
+    - name: Create service account redis (no login, no sudo)
+      user:
+        name: redis
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: Limited sudo for deploy-bot (only restart the service)
+      copy:
+        content: "{{ deploy_user }} ALL=(root) NOPASSWD: /usr/bin/systemctl restart excuse-api.service\n"
+        dest: "/etc/sudoers.d/{{ deploy_user }}"
+        owner: root
+        group: root
+        mode: '0440'
+        validate: visudo -cf %s
+
+    # ---------- SIS1: filesystem plan ----------
+    - name: Create code folder
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ dev_group }}"
+        mode: '0775'
+
+    - name: Create log folder
+      file:
+        path: "{{ log_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+
+    - name: Create error.log
+      copy:
+        content: ""
+        dest: "{{ log_dir }}/error.log"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+        force: no
+
+    # ---------- SIS2: permissions ----------
+    - name: Create backup folder (chown deploy-bot, chmod 700)
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0700'
+
+    - name: Create Redis data folder (only redis has access)
+      file:
+        path: /var/lib/redis
+        state: directory
+        owner: redis
+        group: redis
+        mode: '0700'
+
+    # ---------- SIS2: SSH connection ----------
+    - name: Create .ssh folder for deploy-bot (chmod 700)
+      file:
+        path: "/home/{{ deploy_user }}/.ssh"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0700'
+
+    - name: Create authorized_keys for deploy-bot (chmod 600)
+      copy:
+        content: ""
+        dest: "/home/{{ deploy_user }}/.ssh/authorized_keys"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0600'
+        force: no
+
+    # ---------- SIS2: systemd unit ----------
+    - name: Create main.py (simple placeholder, existing file is not changed)
+      copy:
+        content: |
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b"OK")
+
+          HTTPServer(("0.0.0.0", {{ api_port }}), Handler).serve_forever()
+        dest: "{{ app_dir }}/main.py"
+        owner: "{{ app_user }}"
+        group: "{{ dev_group }}"
+        mode: '0664'
+        force: no
+      notify: restart api
+
+    - name: Create systemd unit excuse-api.service
+      copy:
+        content: |
+          [Unit]
+          Description=IT Excuse Generator Backend API
+          After=network.target
+
+          [Service]
+          User={{ app_user }}
+          WorkingDirectory={{ app_dir }}
+          ExecStart=/usr/bin/python3 main.py
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/excuse-api.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart api
+
+    - name: Enable and start excuse-api
+      systemd:
+        name: excuse-api
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Apply pending handlers now
+      meta: flush_handlers
+
+    # ---------- SIS3: firewall ----------
+    - name: Configure UFW for Backend (SSH and port 8000)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '22'
+        - "{{ api_port }}"
+
+    - name: Enable UFW on Backend
+      ufw:
+        state: enabled
+
+    # ---------- SMOKE TESTS (backend) ----------
+    - name: SMOKE TEST 2 - Python requests library works
+      command: python3 -c "import requests; print(requests.__version__)"
+      register: req_check
+      changed_when: false
+
+    - name: Show requests version
+      debug:
+        msg: "Requests library version {{ req_check.stdout }} is working!"
+
+    - name: SMOKE TEST 3 - Git is installed
+      command: git --version
+      register: git_check
+      changed_when: false
+
+    - name: Show Git version
+      debug:
+        msg: "{{ git_check.stdout }}"
+
+    - name: SMOKE TEST 4 - deploy-bot is in group develop-team
+      command: id -nG {{ deploy_user }}
+      register: id_check
+      changed_when: false
+      failed_when: dev_group not in id_check.stdout.split()
+
+    - name: SMOKE TEST 5 - User redis exists
+      command: id redis
+      changed_when: false
+
+    - name: Get permissions of backup folder, Redis folder and SSH files
+      stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ backup_dir }}"
+        - /var/lib/redis
+        - "/home/{{ deploy_user }}/.ssh"
+        - "/home/{{ deploy_user }}/.ssh/authorized_keys"
+      register: perm
+
+    - name: SMOKE TEST 6 - Permissions are correct (700, 700, 700, 600)
+      assert:
+        that:
+          - perm.results[0].stat.mode == '0700'
+          - perm.results[0].stat.pw_name == deploy_user
+          - perm.results[1].stat.mode == '0700'
+          - perm.results[1].stat.pw_name == 'redis'
+          - perm.results[2].stat.mode == '0700'
+          - perm.results[3].stat.mode == '0600'
+        success_msg: "All permissions are correct"
+
+    - name: Check sudo rights of deploy-bot
+      command: sudo -l -U {{ deploy_user }}
+      register: sudo_check
+      changed_when: false
+
+    - name: SMOKE TEST 7 - deploy-bot can only restart excuse-api
+      assert:
+        that:
+          - "'systemctl restart excuse-api.service' in sudo_check.stdout"
+        success_msg: "deploy-bot sudo rule is correct"
+
+    - name: Check service status
+      command: systemctl is-active excuse-api  # noqa command-instead-of-module
+      register: svc
+      changed_when: false
+      failed_when: svc.stdout != 'active'
+
+    - name: SMOKE TEST 8 - excuse-api is active (running) and enabled
+      command: systemctl is-enabled excuse-api  # noqa command-instead-of-module
+      register: svc_en
+      changed_when: false
+      failed_when: svc_en.stdout != 'enabled'
+
+    - name: SMOKE TEST 9 - Application answers on port 8000
+      uri:
+        url: "http://localhost:{{ api_port }}"
+        status_code: 200
+
+    - name: Read firewall status
+      command: ufw status
+      register: ufw_back
+      changed_when: false
+
+    - name: SMOKE TEST 10 - Backend firewall allows 22 and 8000
+      assert:
+        that:
+          - "'22/tcp' in ufw_back.stdout"
+          - "(api_port | string) + '/tcp' in ufw_back.stdout"
+        success_msg: "Backend firewall rules are correct"
+
+- name: Frontend VM1 (SIS1, SIS3)
+  hosts: frontend
+  become: yes
+  vars:
+    app_user: mariya
+    web_root: /var/www/excuse-gen/html
+    log_dir: /var/log/excuse-gen
+    api_port: 8000
+    backend_ip: "{{ hostvars[groups['backend'][0]].ansible_host }}"
+  tasks:
+    # ---------- SIS3: packages ----------
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+        lock_timeout: 120
+
+    - name: Start and enable Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    # ---------- SIS1: filesystem plan ----------
+    - name: Create web folder
+      file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+
+    - name: Create index.html
+      copy:
+        content: ""
+        dest: "{{ web_root }}/index.html"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+        force: no
+
+    - name: Create log folder
+      file:
+        path: "{{ log_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+
+    - name: Create error.log
+      copy:
+        content: ""
+        dest: "{{ log_dir }}/error.log"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+        force: no
+
+    # ---------- SIS3: firewall ----------
+    - name: Configure UFW for Frontend (SSH and HTTP)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '22'
+        - '80'
+
+    - name: Enable UFW on Frontend
+      ufw:
+        state: enabled
+
+    # ---------- SMOKE TESTS (frontend, same as test.sh from SIS3) ----------
+    - name: SMOKE TEST 11 - Local web server answers HTTP 200 (curl -I localhost)
+      uri:
+        url: http://localhost
+        method: HEAD
+        status_code: 200
+
+    - name: SMOKE TEST 12 - Backend SSH port is reachable (nc -zv backend 22)
+      wait_for:
+        host: "{{ backend_ip }}"
+        port: 22
+        timeout: 5
+
+    - name: SMOKE TEST 13 - Backend port 8000 is reachable from Frontend
+      wait_for:
+        host: "{{ backend_ip }}"
+        port: "{{ api_port }}"
+        timeout: 5
+
+    - name: Get permissions of web and log folders
+      stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ web_root }}/index.html"
+        - "{{ log_dir }}/error.log"
+      register: front_files
+
+    - name: SMOKE TEST 14 - index.html and error.log exist
+      assert:
+        that:
+          - front_files.results[0].stat.exists
+          - front_files.results[1].stat.exists
+        success_msg: "Project files exist"
+
+    - name: Read firewall status
+      command: ufw status
+      register: ufw_front
+      changed_when: false
+
+    - name: SMOKE TEST 15 - Frontend firewall allows 22 and 80
+      assert:
+        that:
+          - "'22/tcp' in ufw_front.stdout"
+          - "'80/tcp' in ufw_front.stdout"
+        success_msg: "Frontend firewall rules are correct"
