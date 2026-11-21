@@ -1,0 +1,22 @@
+---
+app_user: mariya
+deploy_user: deploy-bot
+dev_group: develop-team
+service_name: excuse-api
+api_port: 8000
+
+web_root: /var/www/excuse-gen/html
+app_dir: /opt/excuse-api/app
+log_dir: /var/log/excuse-gen
+backup_dir: /var/backups/excuse-db
+
+backend_ip: "{{ hostvars[groups['backend'][0]].ansible_host }}"
+
+excuses:
+  - "It is a DNS problem"
+  - "The database needs more memory"
+  - "It works on my machine"
+  - "The cache was not warmed up"
+  - "Someone deployed on Friday"
+  - "The certificate expired yesterday"
+  - "It is a network latency issue"
