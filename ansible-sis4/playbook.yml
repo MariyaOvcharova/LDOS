@@ -300,9 +300,13 @@
       failed_when: svc_en.stdout != 'enabled'
 
     - name: SMOKE TEST 9 - Application answers on port 8000
-      uri:
-        url: "http://localhost:{{ api_port }}"
+      ansible.builtin.uri:
+        url: http://localhost:8000
         status_code: 200
+      register: api_check
+      retries: 5
+      delay: 3
+      until: api_check.status == 200
 
     - name: Read firewall status
       command: ufw status
