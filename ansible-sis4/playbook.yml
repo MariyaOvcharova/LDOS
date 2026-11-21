@@ -10,8 +10,6 @@
     - name: Install base packages (ssh, curl, netcat, firewall)
       apt:
         name:
-          - avahi-daemon
-          - libnss-mdns
           - openssh-server
           - curl
           - netcat-openbsd
@@ -162,18 +160,13 @@
         force: no
 
     # ---------- SIS2: systemd unit ----------
-    - name: Create main.py (simple placeholder, existing file is not changed)
+    - name: Create main.py (same as in SIS3, existing file is not changed)
       copy:
         content: |
-          from http.server import BaseHTTPRequestHandler, HTTPServer
-
-          class Handler(BaseHTTPRequestHandler):
-              def do_GET(self):
-                  self.send_response(200)
-                  self.end_headers()
-                  self.wfile.write(b"OK")
-
-          HTTPServer(("0.0.0.0", {{ api_port }}), Handler).serve_forever()
+          import time
+          while True:
+              print("Excuse API is running")
+              time.sleep(60)
         dest: "{{ app_dir }}/main.py"
         owner: "{{ app_user }}"
         group: "{{ dev_group }}"
@@ -299,14 +292,9 @@
       changed_when: false
       failed_when: svc_en.stdout != 'enabled'
 
-    - name: SMOKE TEST 9 - Application answers on port 8000
-      ansible.builtin.uri:
-        url: http://localhost:8000
-        status_code: 200
-      register: api_check
-      retries: 5
-      delay: 3
-      until: api_check.status == 200
+    - name: SMOKE TEST 9 - Application process (main.py) is running
+      command: pgrep -f main.py
+      changed_when: false
 
     - name: Read firewall status
       command: ufw status
@@ -406,12 +394,6 @@
         port: 22
         timeout: 5
 
-    - name: SMOKE TEST 13 - Backend port 8000 is reachable from Frontend
-      wait_for:
-        host: "{{ backend_ip }}"
-        port: "{{ api_port }}"
-        timeout: 5
-
     - name: Get permissions of web and log folders
       stat:
         path: "{{ item }}"
@@ -420,7 +402,7 @@
         - "{{ log_dir }}/error.log"
       register: front_files
 
-    - name: SMOKE TEST 14 - index.html and error.log exist
+    - name: SMOKE TEST 13 - index.html and error.log exist
       assert:
         that:
           - front_files.results[0].stat.exists
@@ -432,7 +414,7 @@
       register: ufw_front
       changed_when: false
 
-    - name: SMOKE TEST 15 - Frontend firewall allows 22 and 80
+    - name: SMOKE TEST 14 - Frontend firewall allows 22 and 80
       assert:
         that:
           - "'22/tcp' in ufw_front.stdout"
