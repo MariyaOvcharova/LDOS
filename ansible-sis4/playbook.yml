@@ -10,6 +10,8 @@
     - name: Install base packages (ssh, curl, netcat, firewall)
       apt:
         name:
+          - avahi-daemon
+          - libnss-mdns
           - openssh-server
           - curl
           - netcat-openbsd
